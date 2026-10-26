@@ -9,6 +9,7 @@
 #include <stdlib.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <time.h>
 #include "catalogo.h"
 #include "sesiones.h"
 
@@ -24,6 +25,30 @@ struct Sesion{
   const Catalogo *catalogo;
   size_t          indice;         /* archivo actual del ciclo    */
 };
+
+static estado_t abrir_entrada(const EntradaInterna *en,
+                              int *fd_out, uint64_t *tam_out){
+    int fd = open(en->ruta, O_RDONLY | O_CLOEXEC);
+    if (fd == -1) {
+        if (errno == ENOENT) return SRV_ERR_NO_ENCONTRADO;
+        if (errno == EACCES) return SRV_ERR_NO_SERVIBLE;
+        return SRV_ERR_IO;
+    }
+
+    struct stat st;
+    if (fstat(fd, &st) == -1) {
+        close(fd);
+        return SRV_ERR_IO;
+    }
+    if (!S_ISREG(st.st_mode) || st.st_size == 0) {
+        close(fd);
+        return SRV_ERR_NO_SERVIBLE;
+    }
+
+    *fd_out = fd;
+    *tam_out = (uint64_t)st.st_size;
+    return SRV_OK;
+}
 
 estado_t canal_calcular_punto(const int64_t *duraciones_ms, size_t n, int64_t transcurrido_ms, PuntoCanal *out){
   if (out == NULL) return SRV_ERR_ARGUMENTO;
@@ -75,25 +100,14 @@ estado_t sesion_abrir_demanda(const Catalogo *cat, const char *nombre, Sesion **
       break;
     }
   }
+
   if (entrada == NULL) return SRV_ERR_NO_ENCONTRADO;
 
-  int fd = open(entrada->ruta, O_RDONLY | O_CLOEXEC);
-  if (fd == -1) {
-      if (errno == ENOENT) return SRV_ERR_NO_ENCONTRADO;
-      if (errno == EACCES) return SRV_ERR_NO_SERVIBLE;
-      return SRV_ERR_IO;
-  }
+  int fd;
+  uint64_t tam;
+  estado_t e = abrir_entrada(entrada, &fd , &tam);
 
-  struct stat st;
-  if (fstat(fd, &st) == -1) {
-      close(fd);
-      return SRV_ERR_IO;
-  }
-
-  if (!S_ISREG(st.st_mode)) {
-      close(fd);
-      return SRV_ERR_NO_SERVIBLE;
-  }
+  if(e != SRV_OK) return e;
 
   struct Sesion *ses = calloc(1, sizeof(*ses));
   if (ses == NULL) {
@@ -103,43 +117,55 @@ estado_t sesion_abrir_demanda(const Catalogo *cat, const char *nombre, Sesion **
 
   ses->modo = SESION_DEMANDA;
   ses->fd = fd;
-  ses->tamano_archivo = (uint64_t)st.st_size;
+  ses->tamano_archivo = tam;
   ses->posicion = 0;
 
   *out = ses;
-  *tamano_total = ses->tamano_archivo;
+  *tamano_total = tam;
   return SRV_OK;
 }
 
-estado_t sesion_abrir_canal(const Catalogo *cat, int64_t transcurrido_ms, Sesion **out){
-  if(out==NULL || cat==NULL || transcurrido_ms<0) return SRV_ERR_ARGUMENTO;
-  if(!catalogo_cantidad(cat)) return SRV_ERR_CATALOGO_VACIO;
+estado_t sesion_abrir_canal(const Catalogo *cat, int64_t transcurrido_ms,
+                            Sesion **out){
+  if (out == NULL)
+      return SRV_ERR_ARGUMENTO;
   *out = NULL;
+  if (cat == NULL || transcurrido_ms < 0)
+      return SRV_ERR_ARGUMENTO;
+  if (!catalogo_cantidad(cat))
+      return SRV_ERR_CATALOGO_VACIO;
 
-  PuntoCanal *punto = calloc(1, sizeof(*punto));
-  canal_calcular_punto(catalogo_duraciones(cat), catalogo_cantidad(cat), transcurrido_ms, punto);
-  
-  EntradaInterna *en;
-  catalogo_obtener(cat, punto->indice, en);
+  const int64_t *duraciones = catalogo_duraciones(cat);
+  if (duraciones == NULL)               /* faltó cargar duraciones */
+      return SRV_ERR_ARGUMENTO;
 
-  if (en == NULL) return SRV_ERR_NO_ENCONTRADO;
+  PuntoCanal punto;
+  estado_t e = canal_calcular_punto(duraciones, catalogo_cantidad(cat),
+                                    transcurrido_ms, &punto);
+  if (e != SRV_OK)
+      return e;
 
-  int fd = open(en->ruta, O_RDONLY | O_CLOEXEC);
-  if (fd == -1) {
-      if (errno == ENOENT) return SRV_ERR_NO_ENCONTRADO;
-      if (errno == EACCES) return SRV_ERR_NO_SERVIBLE;
-      return SRV_ERR_IO;
-  }
+  EntradaInterna *en; 
+  catalogo_obtener(cat, punto.indice, en);
 
-  struct stat st;
-  if (fstat(fd, &st) == -1) {
+  int fd;
+  uint64_t tam;
+  e = abrir_entrada(en, &fd, &tam);
+  if (e != SRV_OK)
+      return e;
+
+  /* ms -> bytes: tamaño * offset_ms / duración (128 bits evita desbordar) */
+  uint64_t offset_bytes = (uint64_t)(((unsigned __int128)tam *
+                          (uint64_t)punto.offset_ms) /
+                          (uint64_t)duraciones[punto.indice]);
+  if (offset_bytes >= tam) {            /* defensivo: no debería pasar */
       close(fd);
       return SRV_ERR_IO;
   }
 
-  if (!S_ISREG(st.st_mode)) {
+  if (lseek(fd, (off_t)offset_bytes, SEEK_SET) == (off_t)-1) {
       close(fd);
-      return SRV_ERR_NO_SERVIBLE;
+      return SRV_ERR_IO;
   }
 
   struct Sesion *ses = calloc(1, sizeof(*ses));
@@ -150,21 +176,77 @@ estado_t sesion_abrir_canal(const Catalogo *cat, int64_t transcurrido_ms, Sesion
 
   ses->modo = SESION_CANAL;
   ses->fd = fd;
-  ses->tamano_archivo = (uint64_t)st.st_size;
-  ses->posicion = punto->offset_ms;
+  ses->tamano_archivo = tam;
+  ses->posicion = offset_bytes;
+  ses->catalogo = cat;
+  ses->indice = punto.indice;
 
   *out = ses;
   return SRV_OK;
 }
 
 estado_t sesion_leer_bloque(Sesion *s, void *buf, size_t max, size_t *leidos){
+  if (leidos == NULL)
+    return SRV_ERR_ARGUMENTO;
+  *leidos = 0;
+  if (s == NULL || buf == NULL || max == 0)
+    return SRV_ERR_ARGUMENTO;
 
+  /* ¿Se acabó el archivo actual? */
+  if (s->posicion >= s->tamano_archivo) {
+      if (s->modo == SESION_DEMANDA)
+        return SRV_OK;
+
+      /* Canal: pasar al siguiente archivo del ciclo (con vuelta al 0) */
+      size_t sig = (s->indice + 1) % catalogo_cantidad(s->catalogo);
+      int nuevo_fd;
+      uint64_t nuevo_tam;
+
+      EntradaInterna temp;
+      catalogo_obtener(s->catalogo, sig, &temp);
+      estado_t e = abrir_entrada(&temp,
+                                 &nuevo_fd, &nuevo_tam);
+      if (e != SRV_OK)
+          return e;           /* la sesión sigue válida; se puede reintentar */
+
+      close(s->fd);
+      s->fd = nuevo_fd;
+      s->tamano_archivo = nuevo_tam;
+      s->posicion = 0;
+      s->indice = sig;
+  }
+
+  /* Nunca leer más allá del final del archivo actual */
+  uint64_t restante = s->tamano_archivo - s->posicion;
+  size_t pedir = (restante < max) ? (size_t)restante : max;
+
+  ssize_t n;
+  do {
+      n = read(s->fd, buf, pedir);
+  } while (n == -1 && errno == EINTR);      /* reintentar si una señal interrumpe */
+
+  if (n < 0)
+      return SRV_ERR_IO;
+  if (n == 0)                               /* el archivo se truncó por fuera */
+      return SRV_ERR_IO;
+
+  s->posicion += (uint64_t)n;
+  *leidos = (size_t)n;
+  return SRV_OK;
 }
 
 void sesion_cerrar(Sesion *s){
-  
+  if (s == NULL)
+      return;
+  if (s->fd >= 0)
+      close(s->fd);
+  free(s); 
 }
 
 int64_t reloj_monotonico_ms(void){
+  struct timespec ts;
+    if (clock_gettime(CLOCK_MONOTONIC, &ts) == -1)
+        return -1;
 
+    return (int64_t)ts.tv_sec * 1000 + (int64_t)(ts.tv_nsec / 1000000);
 }
