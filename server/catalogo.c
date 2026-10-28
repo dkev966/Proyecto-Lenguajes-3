@@ -75,7 +75,8 @@ estado_t catalogo_escanear(const char *ruta, Catalogo **out){
       if (access(nueva.ruta, R_OK) == -1)
           continue;
 
-      snprintf(nueva.nombre, LARGO_NOMBRE, "%s", ent->d_name);
+      size_t len = strlen(ent->d_name);
+      memcpy(nueva.nombre, ent->d_name, len+1);
       nueva.tamano = (uint64_t)st.st_size;
 
       estado = catalogo_agregar(cat, &nueva);
@@ -107,12 +108,9 @@ int64_t* catalogo_duraciones(const Catalogo *cat){
   return cat->duraciones;
 }
 
-estado_t catalogo_obtener(const Catalogo *cat, size_t indice, EntradaInterna *out){
-  if(out==NULL || cat == NULL || indice >= (cat->cantidad)) return SRV_ERR_ARGUMENTO;
-
-  memset(out, 0, sizeof(*out));
-  *out = cat->entradas[indice];
-  return SRV_OK;
+const EntradaInterna *catalogo_obtener(const Catalogo *cat, size_t indice){
+  if(cat == NULL || indice >= cat->cantidad) return NULL;
+  return &cat->entradas[indice];
 }
 
 void catalogo_liberar(Catalogo *cat){
@@ -126,7 +124,7 @@ estado_t catalogo_cargar_duraciones(Catalogo *cat){
   if (cat == NULL ) return SRV_ERR_ARGUMENTO;
   if (cat->cantidad == 0) return SRV_ERR_CATALOGO_VACIO;
 
-  FILE *f = fopen(".duraciones.txt", "r");
+  FILE *f = fopen("../videos/.duraciones.txt", "r");
 
   int64_t *dur = calloc(cat->cantidad, sizeof(*dur));
   if (dur == NULL) {

@@ -23,7 +23,7 @@ typedef struct Catalogo Catalogo;
 typedef struct {
   char nombre[LARGO_NOMBRE];
   uint64_t tamano;
-  char *ruta;
+  char ruta[LARGO_NOMBRE];
 } EntradaInterna;
 
 /* Escanea 'directorio' y crea el catalogo. Se llama dos veces al inicio 
@@ -35,13 +35,12 @@ estado_t catalogo_escanear(const char *directorio, Catalogo **out);
 /* Cantidad de entradas servibles. */
 size_t catalogo_cantidad(const Catalogo *cat);
 
-/* Lista de duraciones de cada entrada. */
+/* Lista de duraciones en de cada entrada. */
 int64_t* catalogo_duraciones(const Catalogo *cat);
  
 /* Copia la entrada 'indice' (0 .. cantidad-1) en *out.
  * Devuelve SRV_ERR_ARGUMENTO si el indice esta fuera de rango. */
-estado_t catalogo_obtener(const Catalogo *cat, size_t indice,
-                          EntradaInterna *out);
+const EntradaInterna *catalogo_obtener(const Catalogo *cat, size_t indice);
  
 /* Libera el catalogo. Acepta NULL. No llamar si hay sesiones abiertas. */
 void catalogo_liberar(Catalogo *cat);

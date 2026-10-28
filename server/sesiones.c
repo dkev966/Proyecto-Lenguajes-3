@@ -93,10 +93,9 @@ estado_t sesion_abrir_demanda(const Catalogo *cat, const char *nombre, Sesion **
   const EntradaInterna *entrada = NULL;
 
   for (size_t i = 0; i < catalogo_cantidad(cat); i++) {
-    EntradaInterna en;
-    catalogo_obtener(cat, i, &en);
-    if (strcmp(en.nombre, nombre) == 0) {
-      entrada = &en;
+    const EntradaInterna *en = catalogo_obtener(cat, i);
+    if (strcmp(en->nombre, nombre) == 0) {
+      entrada = en;
       break;
     }
   }
@@ -145,8 +144,7 @@ estado_t sesion_abrir_canal(const Catalogo *cat, int64_t transcurrido_ms,
   if (e != SRV_OK)
       return e;
 
-  EntradaInterna *en; 
-  catalogo_obtener(cat, punto.indice, en);
+  const EntradaInterna *en = catalogo_obtener(cat, punto.indice);
 
   int fd;
   uint64_t tam;
@@ -202,9 +200,7 @@ estado_t sesion_leer_bloque(Sesion *s, void *buf, size_t max, size_t *leidos){
       int nuevo_fd;
       uint64_t nuevo_tam;
 
-      EntradaInterna temp;
-      catalogo_obtener(s->catalogo, sig, &temp);
-      estado_t e = abrir_entrada(&temp,
+      estado_t e = abrir_entrada(catalogo_obtener(s->catalogo, sig),
                                  &nuevo_fd, &nuevo_tam);
       if (e != SRV_OK)
           return e;           /* la sesión sigue válida; se puede reintentar */
